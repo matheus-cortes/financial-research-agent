@@ -10,6 +10,7 @@ from app.graph.models import (
     ResearchReport,
     ResearchResult,
     RoutingPlan,
+    SpecialistTask,
 )
 
 class ResearchState(TypedDict):
@@ -22,4 +23,15 @@ class ResearchState(TypedDict):
     critique: Critique
     iteration: int
     report: ResearchReport
+    
+class MarketAgentState(TypedDict):
+    ticker: str
+    task: SpecialistTask
+    messages: Annotated[list[BaseMessage], add_messages]
+    result: ResearchResult | None
 
+class NewsAgentState(TypedDict):
+    ticker: str
+    task: SpecialistTask
+    messages: Annotated[list[BaseMessage], add_messages]
+    result: ResearchResult | None

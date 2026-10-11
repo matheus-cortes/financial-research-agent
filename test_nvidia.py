@@ -3,30 +3,46 @@ import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
+
 load_dotenv()
 
-api_key = os.getenv("NVIDIA_API_KEY")
 
 llm = ChatOpenAI(
     model="moonshotai/kimi-k3",
-    api_key=api_key,
+    api_key=os.getenv("NVIDIA_API_KEY"),
     base_url="https://integrate.api.nvidia.com/v1",
     temperature=1,
-    max_tokens=1024,
+    max_tokens=2048,
 )
 
-#response = llm.invoke(
-#    "Explain in one sentence what an AI agent is."
-#)
 
-#print(response.content)
-
-
-response = llm.stream(
-    "Explain in one sentence what an AI agent is."
+json_llm = llm.with_structured_output(
+    method="json_mode",
 )
 
-for chunk in response:
-    print(chunk.content, end="", flush=True)
 
-print()
+result = json_llm.invoke(
+    """
+    Return ONLY valid JSON.
+
+    Use exactly this structure:
+
+    {
+        "area": "test",
+        "agent": "test_agent",
+        "findings": [
+            "test finding"
+        ],
+        "sources": [
+            "test source"
+        ]
+    }
+    """
+)
+
+
+print("========== RESULT ==========")
+print(result)
+
+print("\n========== TYPE ==========")
+print(type(result))

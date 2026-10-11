@@ -1,10 +1,12 @@
 import os
 
 from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import ToolNode
 from langgraph.func import task
 
-from app.graph.state import ResearchState, RoutingPlan
+from app.graph.state import MarketAgentState, ResearchState
 
 from app.graph.models import (
     Critique,
@@ -13,6 +15,11 @@ from app.graph.models import (
     ResearchResult,
     RoutingPlan,
     SpecialistTask,
+)
+
+from app.tools.market import (
+    get_historical_prices,
+    get_stock_price,
 )
 
 load_dotenv()
@@ -27,35 +34,65 @@ llm = ChatOpenAI(
 )
 
 
-planner_llm = llm.with_structured_output(ResearchPlan)
-supervisor_llm = llm.with_structured_output(RoutingPlan)
-financial_llm = llm.with_structured_output(ResearchResult)
-market_llm = llm.with_structured_output(ResearchResult)
-news_llm = llm.with_structured_output(ResearchResult)
-risk_llm = llm.with_structured_output(ResearchResult)
-critic_llm = llm.with_structured_output(Critique)
-critic_llm = llm.with_structured_output(Critique)
-replanner_llm = llm.with_structured_output(ResearchPlan)
-report_llm = llm.with_structured_output(ResearchReport)
+planner_llm = llm.with_structured_output(
+    ResearchPlan,
+    method="json_mode",
+)
+
+supervisor_llm = llm.with_structured_output(
+    RoutingPlan,
+    method="json_mode",
+)
+
+financial_llm = llm.with_structured_output(
+    ResearchResult,
+    method="json_mode",
+)
+
+market_llm = llm.with_structured_output(
+    ResearchResult,
+    method="json_mode",
+)
+
+news_llm = llm.with_structured_output(
+    ResearchResult,
+    method="json_mode",
+)
+
+risk_llm = llm.with_structured_output(
+    ResearchResult,
+    method="json_mode",
+)
+
+critic_llm = llm.with_structured_output(
+    Critique,
+    method="json_mode",
+)
+
+replanner_llm = llm.with_structured_output(
+    ResearchPlan,
+    method="json_mode",
+)
+
+report_llm = llm.with_structured_output(
+    ResearchReport,
+    method="json_mode",
+)
+
+
+market_tools = [
+    get_stock_price,
+    get_historical_prices,
+]
+
+market_tool_llm = llm.bind_tools(market_tools)
+market_tool_node = ToolNode(market_tools)
 
 
 def planner(state: ResearchState):
     ticker = state["ticker"].upper()
 
     print(f"\n[PLANNER] Creating research plan for {ticker}...")
-
-    plan = planner_llm.invoke(
-        f"""
-        Create a financial research plan for the stock ticker {ticker}.
-
-        Identify the main areas that should be investigated to produce
-        a comprehensive financial research report.
-
-        Each task must contain:
-        - area
-        - objective
-        """
-    )
 
     plan = planner_llm.invoke(
         f"""
@@ -74,6 +111,19 @@ def planner(state: ResearchState):
         - objective
 
         Keep the plan focused. Do not create additional tasks.
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "tasks": [
+                {{
+                    "area": "...",
+                    "objective": "..."
+                }}
+            ]
+        }}
         """
     )
 
@@ -95,17 +145,49 @@ def supervisor(state: ResearchState):
         f"""
         You are the supervisor of a financial research workflow.
 
-        Given the research plan below, decide which specialist agent
-        should investigate each task.
+        Given the research plan below, assign each research task to exactly
+        one specialist agent.
 
         Available specialist agents:
+
         - market_agent
+          Handles stock prices, historical performance, trading volume,
+          valuation, dividends, and market-related analysis.
+
         - financial_agent
+          Handles company fundamentals, financial statements, revenue,
+          profitability, margins, debt, leverage, cash flow, and financial
+          performance.
+
         - news_agent
+          Handles recent news, events, announcements, regulatory events,
+          earnings news, and other relevant developments.
+
         - risk_agent
+          Handles regulatory, operational, financial, governance, and
+          other company-specific risks.
 
         Research plan:
         {plan.model_dump_json()}
+
+        Every research task must be assigned to exactly one agent.
+
+        Do not create additional tasks.
+        Do not remove any tasks.
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "decisions": [
+                {{
+                    "area": "...",
+                    "objective": "...",
+                    "agent": "market_agent"
+                }}
+            ]
+        }}
         """
     )
 
@@ -118,6 +200,7 @@ def supervisor(state: ResearchState):
         "routing_plan": routing_plan,
         "logs": ["Research tasks routed"],
     }
+
 
 def financial_agent(state: dict):
     task: SpecialistTask = state["task"]
@@ -135,9 +218,25 @@ def financial_agent(state: dict):
         Analyze what should be investigated for this task.
 
         Do not invent financial data.
-        Return the research findings as structured information.
-        If external financial data is required, indicate what information
-        should be obtained from tools or reliable sources.
+
+        If external financial data is required, clearly identify the
+        information that should be obtained from financial data tools
+        or reliable sources.
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "area": "...",
+            "agent": "financial_agent",
+            "findings": [
+                "..."
+            ],
+            "sources": [
+                "..."
+            ]
+        }}
         """
     )
 
@@ -149,11 +248,77 @@ def financial_agent(state: dict):
     }
 
 
+# -------------------------------------------------------------------
+# MARKET AGENT - TOOL CALLING
+# -------------------------------------------------------------------
 
-def market_agent(state: dict):
+
+def market_agent_start(state: MarketAgentState):
     task: SpecialistTask = state["task"]
 
     print(f"[MARKET_AGENT] Starting: {task.area}")
+
+    message = HumanMessage(
+        content=f"""
+        You are the market specialist agent in a financial research workflow.
+
+        Ticker: {task.ticker}
+        Research area: {task.area}
+        Objective: {task.objective}
+
+        Investigate the objective using the available market tools when
+        external market data is required.
+
+        Available tools:
+        - get_stock_price
+        - get_historical_prices
+
+        Do not invent market data.
+
+        Use the tools when they provide information necessary to investigate
+        the objective.
+        """
+    )
+
+    return {
+        "messages": [message],
+    }
+
+
+def market_agent_llm_call(state: MarketAgentState):
+    print("[MARKET_AGENT] Calling LLM...")
+
+    response = market_tool_llm.invoke(state["messages"])
+
+    if response.tool_calls:
+        for tool_call in response.tool_calls:
+            print(
+                f"[MARKET_AGENT] Tool requested: "
+                f"{tool_call['name']}"
+            )
+
+    else:
+        print("[MARKET_AGENT] LLM did not request any tools")
+
+    return {
+        "messages": [response],
+    }
+
+
+def route_market_tools(state: MarketAgentState):
+    last_message = state["messages"][-1]
+
+    if last_message.tool_calls:
+        return "market_tool_node"
+
+    return "market_finalize"
+
+
+def market_finalize(state: MarketAgentState):
+    task: SpecialistTask = state["task"]
+
+    print("[MARKET_AGENT] Generating final structured result...")
+
     result = market_llm.invoke(
         f"""
         You are the market specialist agent in a financial research workflow.
@@ -162,22 +327,40 @@ def market_agent(state: dict):
         Research area: {task.area}
         Objective: {task.objective}
 
-        Analyze what should be investigated for this market-related task.
+        Based on the investigation performed by the agent and the tool
+        results contained in the messages below, produce the final
+        structured research result.
 
         Do not invent market data.
-        If external market data is required, indicate what information
-        should be obtained from tools or reliable sources.
+
+        If the available tools did not provide enough information to fully
+        answer the objective, clearly state that limitation in the findings.
+
+        Investigation messages:
+        {state["messages"]}
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "area": "...",
+            "agent": "market_agent",
+            "findings": [
+                "..."
+            ],
+            "sources": [
+                "..."
+            ]
+        }}
         """
     )
 
     print(f"[MARKET_AGENT] Completed: {task.area}")
 
     return {
-        "research_results": [result],
-        "logs": [f"Market research completed: {task.area}"],
+        "result": result,
     }
-
-
 
 
 def news_agent(state: dict):
@@ -187,17 +370,32 @@ def news_agent(state: dict):
 
     result = news_llm.invoke(
         f"""
-        You are the news specialist agent in a financial research workflow.
+        You are the news specialist agent for a financial research workflow.
 
         Ticker: {task.ticker}
         Research area: {task.area}
         Objective: {task.objective}
 
-        Analyze what news, events and recent developments should be investigated.
+        Identify the news and events that should be investigated for this task.
 
-        Do not invent news or events.
-        If external information is required, indicate what should be obtained
-        from news or company-event tools.
+        Do not invent facts or news.
+        If external information is required, clearly state what information
+        should be obtained from reliable sources.
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "area": "{task.area}",
+            "agent": "news_agent",
+            "findings": [
+                "..."
+            ],
+            "sources": [
+                "..."
+            ]
+        }}
         """
     )
 
@@ -225,8 +423,25 @@ def risk_agent(state: dict):
         Analyze what risks and risk-related information should be investigated.
 
         Do not invent facts.
-        If external information is required, indicate what should be obtained
-        from appropriate tools or reliable sources.
+
+        If external information is required, clearly identify the
+        information that should be obtained from appropriate tools
+        or reliable sources.
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "area": "...",
+            "agent": "risk_agent",
+            "findings": [
+                "..."
+            ],
+            "sources": [
+                "..."
+            ]
+        }}
         """
     )
 
@@ -236,7 +451,6 @@ def risk_agent(state: dict):
         "research_results": [result],
         "logs": [f"Risk research completed: {task.area}"],
     }
-
 
 
 def critic(state: ResearchState):
@@ -262,6 +476,23 @@ def critic(state: ResearchState):
 
         Research results:
         {results}
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "sufficient": true,
+            "strengths": [
+                "..."
+            ],
+            "gaps": [
+                "..."
+            ],
+            "recommendations": [
+                "..."
+            ]
+        }}
         """
     )
 
@@ -308,6 +539,19 @@ def replanner(state: ResearchState):
         Each task must contain:
         - area
         - objective
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "tasks": [
+                {{
+                    "area": "...",
+                    "objective": "..."
+                }}
+            ]
+        }}
         """
     )
 
@@ -351,6 +595,21 @@ def report_agent(state: ResearchState):
 
         Research results:
         {results}
+
+        Return ONLY valid JSON.
+
+        Use exactly this structure:
+
+        {{
+            "ticker": "...",
+            "executive_summary": "...",
+            "company_overview": "...",
+            "market_performance": "...",
+            "financial_performance": "...",
+            "news_and_events": "...",
+            "risks": "...",
+            "conclusion": "..."
+        }}
         """
     )
 
